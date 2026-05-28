@@ -199,7 +199,7 @@ impl GeocodeIndex {
                 Box::new(TermQuery::new(country_term, IndexRecordOption::Basic));
             Box::new(BooleanQuery::new(vec![
                 (Occur::Must, base_query),
-                (Occur::Must, country_query),
+                (Occur::Should, country_query),
             ]))
         } else {
             base_query

@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -15,10 +16,7 @@ pub fn read_osm_places(dir: &Path) -> Result<Vec<Place>, Box<dyn std::error::Err
     let pbf_files: Vec<_> = std::fs::read_dir(dir)?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| {
-            let name = path.to_string_lossy();
-            name.ends_with(".osm.pbf")
-        })
+        .filter(|path| path.to_string_lossy().ends_with(".osm.pbf"))
         .collect();
 
     if pbf_files.is_empty() {
@@ -29,11 +27,32 @@ pub fn read_osm_places(dir: &Path) -> Result<Vec<Place>, Box<dyn std::error::Err
     let mut all_places = Vec::new();
 
     for path in pbf_files {
+        // Pass 1: collect node id → (lat, lon) so way centroids can be computed.
+        let reader = ElementReader::from_path(&path)?;
+        let coords_mutex: Mutex<HashMap<i64, (f64, f64)>> = Mutex::new(HashMap::new());
+
+        reader.for_each(|element| match &element {
+            Element::Node(n) => {
+                if let Ok(mut m) = coords_mutex.lock() {
+                    m.insert(n.id(), (n.lat(), n.lon()));
+                }
+            }
+            Element::DenseNode(n) => {
+                if let Ok(mut m) = coords_mutex.lock() {
+                    m.insert(n.id(), (n.lat(), n.lon()));
+                }
+            }
+            _ => {}
+        })?;
+
+        let node_coords = coords_mutex.into_inner()?;
+
+        // Pass 2: extract places from nodes and ways.
         let reader = ElementReader::from_path(&path)?;
         let places_mutex = Mutex::new(Vec::new());
 
         reader.for_each(|element| {
-            if let Some(place) = extract_place_from_element(&element) {
+            if let Some(place) = extract_place_from_element(&element, &node_coords) {
                 if let Ok(mut guard) = places_mutex.lock() {
                     guard.push(place);
                 }
@@ -47,7 +66,10 @@ pub fn read_osm_places(dir: &Path) -> Result<Vec<Place>, Box<dyn std::error::Err
     Ok(all_places)
 }
 
-fn extract_place_from_element(element: &Element<'_>) -> Option<Place> {
+fn extract_place_from_element(
+    element: &Element<'_>,
+    node_coords: &HashMap<i64, (f64, f64)>,
+) -> Option<Place> {
     match element {
         Element::Node(node) => {
             let tags: Vec<(&str, &str)> = node.tags().collect();
@@ -55,24 +77,19 @@ fn extract_place_from_element(element: &Element<'_>) -> Option<Place> {
             if name.is_empty() {
                 return None;
             }
-
             let lat = node.lat();
             let lon = node.lon();
             if !AFRICA.contains(lon, lat) {
                 return None;
             }
-
             let category = extract_category(&tags)?;
-            let names = extract_names(&tags);
-            let address = extract_address(&tags);
-
             Some(Place {
                 id: PlaceId::Osm(OsmId::Node(node.id())),
-                names,
+                names: extract_names(&tags),
                 category,
                 lat,
                 lon,
-                address,
+                address: extract_address(&tags),
                 source: Source::Osm,
             })
         }
@@ -82,31 +99,54 @@ fn extract_place_from_element(element: &Element<'_>) -> Option<Place> {
             if name.is_empty() {
                 return None;
             }
-
             let lat = node.lat();
             let lon = node.lon();
             if !AFRICA.contains(lon, lat) {
                 return None;
             }
-
             let category = extract_category(&tags)?;
-            let names = extract_names(&tags);
-            let address = extract_address(&tags);
-
             Some(Place {
                 id: PlaceId::Osm(OsmId::Node(node.id())),
-                names,
+                names: extract_names(&tags),
                 category,
                 lat,
                 lon,
-                address,
+                address: extract_address(&tags),
                 source: Source::Osm,
             })
         }
-        Element::Way(_) => {
-            // Ways don't carry coordinates in osmpbf — node references would need
-            // a second pass to resolve. Skip for now; most POIs are nodes.
-            None
+        Element::Way(way) => {
+            let tags: Vec<(&str, &str)> = way.tags().collect();
+            let name = find_tag(&tags, "name")?;
+            if name.is_empty() {
+                return None;
+            }
+            let category = extract_category(&tags)?;
+
+            // Compute centroid from referenced node coordinates.
+            let coords: Vec<(f64, f64)> = way
+                .refs()
+                .filter_map(|id| node_coords.get(&id).copied())
+                .collect();
+            if coords.is_empty() {
+                return None;
+            }
+            let n = coords.len() as f64;
+            let lat = coords.iter().map(|(la, _)| la).sum::<f64>() / n;
+            let lon = coords.iter().map(|(_, lo)| lo).sum::<f64>() / n;
+            if !AFRICA.contains(lon, lat) {
+                return None;
+            }
+
+            Some(Place {
+                id: PlaceId::Osm(OsmId::Way(way.id())),
+                names: extract_names(&tags),
+                category,
+                lat,
+                lon,
+                address: extract_address(&tags),
+                source: Source::Osm,
+            })
         }
         Element::Relation(_) => None,
     }
@@ -125,13 +165,11 @@ fn extract_category(tags: &[(&str, &str)]) -> Option<Category> {
         find_tag(tags, "place"),
         find_tag(tags, "landuse"),
     ];
-
     for candidate in candidates.into_iter().flatten() {
         if let Some(cat) = map_osm_tag_to_category(candidate) {
             return Some(cat);
         }
     }
-
     None
 }
 
@@ -164,14 +202,12 @@ fn map_osm_tag_to_category(value: &str) -> Option<Category> {
 
 fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
     let mut names = Vec::new();
-
     let lang_keys: &[(&str, Lang)] = &[
         ("name:en", Lang::En),
         ("name:fr", Lang::Fr),
         ("name:ar", Lang::Ar),
         ("name:sw", Lang::Sw),
     ];
-
     for (key, lang) in lang_keys {
         if let Some(val) = find_tag(tags, key) {
             if !val.is_empty() {
@@ -179,7 +215,6 @@ fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
             }
         }
     }
-
     if let Some(default_name) = find_tag(tags, "name") {
         if !default_name.is_empty() {
             let already_has = names.iter().any(|(_, n)| n == default_name);
@@ -188,7 +223,6 @@ fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
             }
         }
     }
-
     names
 }
 
@@ -200,11 +234,9 @@ fn extract_address(tags: &[(&str, &str)]) -> Option<Address> {
     let country = find_tag(tags, "addr:country")
         .map(str::to_string)
         .unwrap_or_default();
-
     if street.is_none() && city.is_none() && country.is_empty() {
         return None;
     }
-
     Some(Address {
         street,
         city,
