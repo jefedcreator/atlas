@@ -82,7 +82,7 @@ fn extract_place_from_element(
             if !AFRICA.contains(lon, lat) {
                 return None;
             }
-            let category = extract_category(&tags)?;
+            let category = extract_category(&tags).unwrap_or(Category::Place);
             Some(Place {
                 id: PlaceId::Osm(OsmId::Node(node.id())),
                 names: extract_names(&tags),
@@ -104,7 +104,7 @@ fn extract_place_from_element(
             if !AFRICA.contains(lon, lat) {
                 return None;
             }
-            let category = extract_category(&tags)?;
+            let category = extract_category(&tags).unwrap_or(Category::Place);
             Some(Place {
                 id: PlaceId::Osm(OsmId::Node(node.id())),
                 names: extract_names(&tags),
@@ -121,7 +121,7 @@ fn extract_place_from_element(
             if name.is_empty() {
                 return None;
             }
-            let category = extract_category(&tags)?;
+            let category = extract_category(&tags).unwrap_or(Category::Place);
 
             // Compute centroid from referenced node coordinates.
             let coords: Vec<(f64, f64)> = way
@@ -164,6 +164,10 @@ fn extract_category(tags: &[(&str, &str)]) -> Option<Category> {
         find_tag(tags, "building"),
         find_tag(tags, "place"),
         find_tag(tags, "landuse"),
+        find_tag(tags, "leisure"),
+        find_tag(tags, "natural"),
+        find_tag(tags, "healthcare"),
+        find_tag(tags, "office"),
     ];
     for candidate in candidates.into_iter().flatten() {
         if let Some(cat) = map_osm_tag_to_category(candidate) {
@@ -180,7 +184,7 @@ fn map_osm_tag_to_category(value: &str) -> Option<Category> {
         "church" | "chapel" | "cathedral" | "place_of_worship" => Some(Category::Church),
         "school" | "kindergarten" => Some(Category::School),
         "university" | "college" => Some(Category::University),
-        "hospital" | "clinic" | "doctors" | "pharmacy" | "health_centre" => {
+        "hospital" | "clinic" | "doctors" | "pharmacy" | "health_centre" | "health_post" => {
             Some(Category::Hospital)
         }
         "fuel" => Some(Category::FuelStation),
@@ -196,12 +200,28 @@ fn map_osm_tag_to_category(value: &str) -> Option<Category> {
         "supermarket" | "mall" | "convenience" | "commercial" | "retail" => {
             Some(Category::Commercial)
         }
+        // building tag values not covered above
+        "stadium" | "public" | "civic" | "office" => Some(Category::Place),
+        // office tag values
+        "ngo" | "company" | "educational_institution" | "telecommunication" | "financial" => {
+            Some(Category::Government)
+        }
+        // leisure tag
+        "park" | "garden" | "sports_centre" | "recreation_ground" => Some(Category::Place),
+        // natural tag
+        "beach" | "bay" | "water" | "coastline" | "wetland" | "nature_reserve" => {
+            Some(Category::Place)
+        }
+        // place tag (suburbs, neighbourhoods, localities)
+        "city" | "town" | "suburb" | "neighbourhood" | "locality"
+        | "village" | "hamlet" | "borough" | "quarter" => Some(Category::Place),
         _ => None,
     }
 }
 
 fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
     let mut names = Vec::new();
+
     let lang_keys: &[(&str, Lang)] = &[
         ("name:en", Lang::En),
         ("name:fr", Lang::Fr),
@@ -215,6 +235,8 @@ fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
             }
         }
     }
+
+    // Default name — insert first so it becomes primary_name
     if let Some(default_name) = find_tag(tags, "name") {
         if !default_name.is_empty() {
             let already_has = names.iter().any(|(_, n)| n == default_name);
@@ -223,6 +245,16 @@ fn extract_names(tags: &[(&str, &str)]) -> Vec<(Lang, String)> {
             }
         }
     }
+
+    // Alternate / short / official names — searchable but don't override display name
+    for key in &["alt_name", "short_name", "official_name", "loc_name"] {
+        if let Some(val) = find_tag(tags, key) {
+            if !val.is_empty() && !names.iter().any(|(_, n)| n == val) {
+                names.push((Lang::En, val.to_string()));
+            }
+        }
+    }
+
     names
 }
 

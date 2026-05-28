@@ -105,9 +105,9 @@ impl GeocodeIndex {
             .map_err(|e| AtlasError::GeocodeIndexError(e.to_string()))?;
 
         for place in places {
-            let primary_name = place.primary_name(None).to_string();
-            let ascii_name = strip_diacritics(&primary_name);
-            let phonetic = phonetic_encode(&ascii_name);
+            if place.names.is_empty() {
+                continue;
+            }
 
             let country = place
                 .address
@@ -130,9 +130,16 @@ impl GeocodeIndex {
             let source_id_str = format!("{:?}", place.id);
 
             let mut doc = TantivyDocument::new();
-            doc.add_text(fields.name, &primary_name);
-            doc.add_text(fields.name_ascii, &ascii_name);
-            doc.add_text(fields.name_phonetic, &phonetic);
+
+            // Index every name variant (primary first → returned by get_first on retrieval)
+            for (_, name) in &place.names {
+                let ascii = strip_diacritics(name);
+                let phonetic = phonetic_encode(&ascii);
+                doc.add_text(fields.name, name.as_str());
+                doc.add_text(fields.name_ascii, &ascii);
+                doc.add_text(fields.name_phonetic, &phonetic);
+            }
+
             doc.add_text(fields.category, place.category.as_str());
             doc.add_text(fields.country, &country);
             doc.add_text(fields.city, &city);

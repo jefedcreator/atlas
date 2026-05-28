@@ -48,6 +48,7 @@ pub enum Category {
     Government,
     Residential,
     Commercial,
+    Place,
 }
 
 impl Category {
@@ -68,6 +69,7 @@ impl Category {
             Category::Government => "government",
             Category::Residential => "residential",
             Category::Commercial => "commercial",
+            Category::Place => "place",
         }
     }
 
@@ -96,6 +98,10 @@ impl Category {
             }
             "residential" | "house" | "apartment" => Some(Category::Residential),
             "commercial" | "shop" | "mall" | "supermarket" => Some(Category::Commercial),
+            "place" | "suburb" | "neighbourhood" | "locality" | "city"
+            | "town" | "village" | "hamlet" | "park" | "garden"
+            | "stadium" | "sports_centre" | "beach" | "bay" | "campus"
+            | "water" | "nature_reserve" => Some(Category::Place),
             _ => None,
         }
     }
